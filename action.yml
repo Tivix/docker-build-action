@@ -1,0 +1,127 @@
+name: 'Docker build'
+description: 'Builds, scans, and pushes a docker image'
+inputs:
+  # Docker build stage
+  docker-path:
+    description: 'Path to build in'
+    required: false
+    default: './'
+  docker-tag:
+    description: 'Docker tag of the built image'
+    required: true
+  docker-dockerfile:
+    description: 'Dockerfile to use'
+    required: false
+  docker-target:
+    description: 'Dockerfile target stage'
+    required: false
+  docker-build-args:
+    description: 'Comma seperated build args to pass'
+    required: false
+  docker-cache-from:
+    description: 'Where should docker look for caches'
+    required: false
+  docker-cache-to:
+    description: 'Where should docker write caches'
+    required: false
+    default: 'type=inline'
+  docker-extra-args:
+    description: 'Extra arguments to pass to docker build'
+    required: false
+  docker-attempt-pull:
+    description: 'Will attempt to pull the tag before building'
+    required: false
+    default: false
+  # Trivy scan stage
+  trivy-scan:
+    description: 'Whether we scan the image'
+    required: false
+    default: false
+  trivy-version:
+    description: 'Which trivy version to use'
+    required: false
+    default: 'latest'
+  trivy-format:
+    description: 'Trivys output format'
+    required: false
+    default: 'table'
+  trivy-exit-code:
+    description: 'Trivys exit code upon scan failure'
+    required: false
+    default: '2'
+  trivy-ignore-unfixed:
+    description: 'Should we ignore unfixed CVEs'
+    required: false
+    default: false
+  trivy-vuln-type:
+    description: 'Which vulnerabilities to scan'
+    required: false
+    default: 'os,library'
+  trivy-severity:
+    description: 'What severity CVEs should fail the scan. Can be UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL or a mix of those.'
+    required: false
+    default: 'MEDIUM,HIGH,CRITICAL'
+  trivy-github-token:
+    description: 'Github token to use'
+    required: false
+  # Docker push stage
+  docker-push:
+    description: 'Push the built image'
+    required: false
+    default: true
+runs:
+  using: "composite"
+  steps:
+    - name: Build docker image
+      shell: bash
+      run: |
+        # >> Running docker build
+        if [[ "${{ inputs.docker-attempt-pull }}" == "true" ]]; then
+          docker pull ${{ inputs.docker-tag }} || echo "Image pull failed. Ignoring."
+        fi
+
+        args=("--tag" "${{ inputs.docker-tag }}")
+
+        IFS=',' read -ra BUILD_ARGS <<< "${{ inputs.docker-build-args }}"
+        for arg in "${BUILD_ARGS[@]}"; do 
+          args+=("--build-arg" "${arg}")
+        done
+
+        [ -n "${{ inputs.docker-dockerfile }}" ] && args+=("--file" "${{ inputs.docker-dockerfile }}")
+        [ -n "${{ inputs.docker-target }}" ] && args+=("--target" "${{ inputs.docker-target }}")
+        [ -n "${{ inputs.docker-cache-from }}" ] && args+=("--cache-from" "${{ inputs.docker-cache-from }}")
+        [ -n "${{ inputs.docker-cache-to }}" ] && args+=("--cache-to" "${{ inputs.docker-cache-to }}")
+        [ -n "${{ inputs.docker-extra-args }}" ] && args+=("${{ inputs.docker-extra-args }}")
+        echo Running "docker buildx build ${args[*]} ${{ inputs.docker-path }}"
+        docker buildx build ${args[*]} ${{ inputs.docker-path }}
+
+    - name: Run Trivy vulnerability scanner
+      if: inputs.trivy-scan == 'true'
+      shell: bash
+      run: |
+        # >> Running Trivy vulnerability scanner
+
+        args=("--env" "TRIVY_FORMAT=${{ inputs.trivy-format }}")
+        args+=("--env" "TRIVY_EXIT_CODE=${{ inputs.trivy-exit-code }}")
+        args+=("--env" "TRIVY_IGNORE_UNFIXED=${{ inputs.trivy-ignore-unfixed }}")
+        args+=("--env" "TRIVY_VULN_TYPE=${{ inputs.trivy-vuln-type }}")
+        args+=("--env" "TRIVY_SEVERITY=${{ inputs.trivy-severity }}")
+        args+=("--env" "TRIVY_NO_PROGRESS=true")
+        args+=("--env" "TRIVY_CACHE_DIR=/cache")
+        if [ -n "${{ inputs.trivy-github-token }}" ]; then
+          args+=("--env" "GITHUB_TOKEN=${{ inputs.trivy-github-token }}")
+        fi
+        args+=("--volume" "/var/run/docker.sock:/var/run/docker.sock")
+        args+=("--volume" "trivy-cache:/cache")
+        args+=("aquasec/trivy:${{ inputs.trivy-version }}")
+        args+=("image" "${{ inputs.docker-tag }}")
+
+        echo Running "docker run --rm ${args[*]}"
+        docker run --rm ${args[*]}
+
+    - name: Push docker image
+      if: inputs.docker-push == 'true'
+      shell: bash
+      run: |
+        # >> Running docker push
+        docker push ${{ inputs.docker-tag }}
